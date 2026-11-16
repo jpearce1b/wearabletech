@@ -1,1 +1,646 @@
 
+import processing.serial.*;
+import processing.sound.*;
+
+// ============================================
+// THERMAL / TOUCH — TEMPERATURE WAVES v5
+// Nano ESP32 + TMP117 + Capacitive Touch
+// Processing 4 / USB Serial 115200
+//
+// Fine luminous waves, no blobs.
+// 23-24 C: blue, calm
+// 24-25 C: violet / magenta
+// 25-26 C: coral / orange
+// 26+ C: gold, expressive waves
+//
+// Touch toggles song.mp3 and triggers ripple
+// ============================================
+
+// SERIAL
+Serial arduino;
+int portIndex = -1;
+boolean connected = false;
+
+// TEMPERATURE
+float temperature = 23.0;
+float smoothTemp = 23.0;
+
+float energy = 0;
+float smoothEnergy = 0;
+
+// TOUCH
+int touchValue = 33000;
+int touchThreshold = 45000;
+boolean touching = false;
+boolean previousTouch = false;
+int lastToggle = -1000;
+float touchPulse = 0;
+
+// SOUND
+SoundFile song;
+boolean songLoaded = false;
+boolean musicPlaying = false;
+
+// ANIMATION
+float t = 0;
+
+// WAVES
+int numWaves = 42;
+float[] waveOffset;
+float[] wavePhase;
+
+// STARS
+int numStars = 55;
+float[] starX;
+float[] starY;
+float[] starSize;
+
+// ============================================
+// SETUP
+// ============================================
+
+void setup() {
+
+  size(1200, 800, P2D);
+
+  surface.setTitle("THERMAL / TOUCH");
+  frameRate(60);
+  smooth(8);
+
+  colorMode(HSB, 360, 100, 100, 100);
+
+  println("THERMAL / TOUCH — TEMPERATURE WAVES");
+  println();
+
+  // SERIAL
+
+  String[] ports = Serial.list();
+
+  println("AVAILABLE SERIAL PORTS:");
+
+  for (int i = 0; i < ports.length; i++) {
+    println(i + " : " + ports[i]);
+  }
+
+  if (portIndex == -1) {
+    autoConnect();
+  } else {
+    connectSerial(portIndex);
+  }
+
+  // MUSIC
+
+  try {
+    song = new SoundFile(this, "song.mp3");
+    songLoaded = true;
+    println("Music loaded successfully.");
+  }
+  catch (Exception e) {
+    println("Could not load song.mp3");
+  }
+
+  // WAVES
+
+  waveOffset = new float[numWaves];
+  wavePhase = new float[numWaves];
+
+  for (int i = 0; i < numWaves; i++) {
+    waveOffset[i] = map(
+      i, 0, numWaves - 1,
+      -155, 155
+    );
+
+    wavePhase[i] = random(TWO_PI);
+  }
+
+  // STARS
+
+  starX = new float[numStars];
+  starY = new float[numStars];
+  starSize = new float[numStars];
+
+  for (int i = 0; i < numStars; i++) {
+    starX[i] = random(width);
+    starY[i] = random(height * 0.22,
+                      height * 0.78);
+    starSize[i] = random(0.5, 2.0);
+  }
+
+  println("THERMAL / TOUCH READY");
+}
+
+// ============================================
+// SERIAL CONNECTION
+// ============================================
+
+void autoConnect() {
+
+  String[] ports = Serial.list();
+
+  for (int i = 0; i < ports.length; i++) {
+
+    if (ports[i].contains("usbmodem") ||
+        ports[i].contains("usbserial")) {
+
+      connectSerial(i);
+      return;
+    }
+  }
+
+  println("No Arduino USB port found.");
+}
+
+void connectSerial(int index) {
+
+  try {
+
+    arduino = new Serial(
+      this,
+      Serial.list()[index],
+      115200
+    );
+
+    arduino.clear();
+    arduino.bufferUntil('\n');
+
+    connected = true;
+
+    println("CONNECTED: " + Serial.list()[index]);
+
+  }
+  catch (Exception e) {
+    println("Serial connection failed.");
+    println(e.getMessage());
+  }
+}
+
+// ============================================
+// READ ARDUINO
+// ============================================
+
+void serialEvent(Serial p) {
+
+  String line = p.readStringUntil('\n');
+  if (line == null) return;
+
+  line = trim(line);
+  if (!line.startsWith("Temperature:")) return;
+
+  try {
+
+    String[] parts = split(line, '|');
+    if (parts.length < 2) return;
+
+    String tempString = parts[0]
+      .replace("Temperature:", "")
+      .replace("C", "")
+      .trim();
+
+    float newTemp = float(tempString);
+
+    if (!Float.isNaN(newTemp)) {
+      temperature = newTemp;
+    }
+
+    String touchString = parts[1]
+      .replace("Touch:", "")
+      .replace("*** TOUCH DETECTED ***", "")
+      .trim();
+
+    touchValue = int(touchString);
+    touching = touchValue > touchThreshold;
+
+    if (touching && !previousTouch &&
+        millis() - lastToggle > 450) {
+
+      toggleMusic();
+      touchPulse = 1.0;
+      lastToggle = millis();
+    }
+
+    previousTouch = touching;
+
+  }
+  catch (Exception e) {
+    // Ignore incomplete readings
+  }
+}
+
+// ============================================
+// MUSIC
+// ============================================
+
+void toggleMusic() {
+
+  if (!songLoaded) return;
+
+  if (musicPlaying) {
+    song.stop();
+    musicPlaying = false;
+    println("SOUND OFF");
+  } else {
+    song.loop();
+    musicPlaying = true;
+    println("SOUND ON");
+  }
+}
+
+// ============================================
+// MAIN DRAW
+// ============================================
+
+void draw() {
+
+  // Temperature response smoothing.
+  // Responsive, without abrupt jumps.
+  smoothTemp = lerp(
+    smoothTemp,
+    temperature,
+    0.065
+  );
+
+  // 24 C is the end of the cool range.
+  // Full response at 26 C.
+  energy = constrain(
+    (smoothTemp - 24.0) / 2.0,
+    0,
+    1
+  );
+
+  smoothEnergy = lerp(
+    smoothEnergy,
+    energy,
+    0.055
+  );
+
+  // Smooth constant animation speed.
+  t += 0.008;
+
+  touchPulse *= 0.965;
+
+  drawBackground();
+  drawAtmosphericGlow();
+  drawStars();
+  drawWaves();
+  drawInterface();
+}
+
+// ============================================
+// BACKGROUND
+// ============================================
+
+void drawBackground() {
+
+  float h = lerp(225, 350, smoothEnergy);
+
+  background(
+    h % 360,
+    48,
+    4
+  );
+}
+
+// ============================================
+// CENTRAL ATMOSPHERIC GLOW
+// ============================================
+
+void drawAtmosphericGlow() {
+
+  noStroke();
+
+  float cx = width * 0.55;
+  float cy = height * 0.52;
+
+  // Cool blue to warm magenta/amber
+
+  float glowHue;
+
+  if (smoothEnergy < 0.5) {
+    glowHue = lerp(
+      225, 315,
+      smoothEnergy * 2.0
+    );
+  } else {
+    glowHue = lerp(
+      315, 22,
+      (smoothEnergy - 0.5) * 2.0
+    );
+  }
+
+  // Soft concentric atmospheric light
+
+  for (int i = 60; i > 0; i--) {
+
+    float n = i / 60.0;
+
+    float diameter =
+      170 + n * width * 0.72;
+
+    fill(
+      glowHue,
+      48 + smoothEnergy * 25,
+      75 + smoothEnergy * 15,
+      (1.0 - n) * 1.35
+    );
+
+    ellipse(
+      cx, cy,
+      diameter,
+      diameter * 0.88
+    );
+  }
+
+  for (int i = 35; i > 0; i--) {
+
+    float n = i / 35.0;
+
+    fill(
+      glowHue,
+      45,
+      85,
+      (1.0 - n) * 0.75
+    );
+
+    ellipse(
+      cx, cy,
+      80 + n * 400,
+      65 + n * 330
+    );
+  }
+}
+
+// ============================================
+// STARS
+// ============================================
+
+void drawStars() {
+
+  noStroke();
+
+  for (int i = 0; i < numStars; i++) {
+
+    float flicker =
+      0.65 + 0.35 *
+      sin(t * 1.5 + i * 1.7);
+
+    float h = lerp(
+      220, 25, smoothEnergy
+    );
+
+    fill(
+      h, 35, 90,
+      12 * flicker
+    );
+
+    ellipse(
+      starX[i],
+      starY[i],
+      starSize[i],
+      starSize[i]
+    );
+  }
+}
+
+// ============================================
+// TEMPERATURE-RESPONSIVE FLOWING WAVES
+// ============================================
+
+void drawWaves() {
+
+  noFill();
+
+  float centreY = height * 0.52;
+
+  for (int i = 0; i < numWaves; i++) {
+
+    float n = float(i) / (numWaves - 1);
+
+    // Colour:
+    // blue -> violet -> pink -> orange/gold
+
+    float hue;
+
+    if (smoothEnergy < 0.5) {
+
+      hue = lerp(
+        215 + n * 20,
+        285 + n * 30,
+        smoothEnergy * 2.0
+      );
+
+    } else {
+
+      float warm = (smoothEnergy - 0.5) * 2.0;
+
+      // 320 through 360 to 395 (gold)
+      hue = lerp(
+        315 + n * 25,
+        380 + n * 22,
+        warm
+      );
+    }
+
+    hue = (hue + 360) % 360;
+
+    float brightness =
+      70 + sin(n * PI) * 20 +
+      smoothEnergy * 10;
+
+    float alpha =
+      18 + sin(n * PI) * 20 +
+      smoothEnergy * 12 +
+      touchPulse * 10;
+
+    stroke(
+      hue,
+      48 + smoothEnergy * 35,
+      min(brightness, 100),
+      alpha
+    );
+
+    strokeWeight(
+      0.8 +
+      sin(n * PI) * 0.45 +
+      smoothEnergy * 0.25
+    );
+
+    beginShape();
+
+    for (int x = -24; x <= width + 24; x += 7) {
+
+      float nx = float(x) / width;
+
+      // Amplitude increases with warmth.
+      // At 23-24 C, retain Friday's calm waves.
+
+      float amplitude =
+        0.75 + smoothEnergy * 1.0;
+
+      float w1 =
+        sin(
+          nx * TWO_PI * 1.25 +
+          t * 1.5 +
+          wavePhase[i] * 0.6
+        ) * 44 * amplitude;
+
+      float w2 =
+        sin(
+          nx * TWO_PI * 2.4 -
+          t * 0.8 +
+          i * 0.13
+        ) * (23 + smoothEnergy * 24);
+
+      // More intricate curves with warmth
+      float w3 =
+        sin(
+          nx * TWO_PI *
+          (4.5 + smoothEnergy * 1.5) +
+          t * 0.55 +
+          i * 0.07
+        ) * (7 + smoothEnergy * 18);
+
+      float organic = noise(
+        nx * (2.3 + smoothEnergy * 0.7),
+        i * 0.065,
+        t * 0.1
+      );
+
+      float noiseY =
+        (organic - 0.5) *
+        (65 + smoothEnergy * 70);
+
+      float y =
+        centreY +
+        waveOffset[i] +
+        w1 + w2 + w3 + noiseY;
+
+      // Touch ripple
+
+      if (touchPulse > 0.01) {
+
+        float progress = 1.0 - touchPulse;
+
+        float rippleCentre =
+          width * (0.5 + progress * 0.45);
+
+        float distance =
+          abs(x - rippleCentre);
+
+        float envelope =
+          exp(
+            -distance * distance / 38000.0
+          );
+
+        y += sin(
+          distance * 0.023 -
+          progress * 10
+        ) * envelope *
+        touchPulse * 45;
+      }
+
+      curveVertex(x, y);
+    }
+
+    endShape();
+  }
+}
+
+// ============================================
+// MINIMAL INTERFACE
+// ============================================
+
+void drawInterface() {
+
+  textAlign(LEFT);
+
+  // TOP LEFT
+
+  fill(220, 12, 75);
+  textSize(14);
+  text("THERMAL / TOUCH", 40, 45);
+
+  // TOP RIGHT
+
+  textAlign(RIGHT);
+  textSize(14);
+
+  if (musicPlaying) {
+    fill(190, 40, 95);
+    text("○ SOUND ON", width - 40, 45);
+  } else {
+    fill(220, 12, 65);
+    text("○ SOUND OFF", width - 40, 45);
+  }
+
+  // BOTTOM LEFT
+
+  textAlign(LEFT);
+
+  fill(220, 12, 65);
+  textSize(13);
+  text("TEMPERATURE", 40, height - 74);
+
+  fill(0, 0, 100);
+  textSize(34);
+
+  text(
+    nf(temperature, 1, 2) + " °C",
+    40,
+    height - 29
+  );
+
+  // BOTTOM RIGHT
+
+  textAlign(RIGHT);
+
+  fill(220, 12, 65);
+  textSize(13);
+  text("CAPACITIVE INPUT",
+       width - 40, height - 74);
+
+  fill(0, 0, 100);
+  textSize(30);
+  text(str(touchValue),
+       width - 40, height - 29);
+
+  // BOTTOM CENTRE
+
+  textAlign(CENTER);
+  textSize(12);
+  fill(220, 12, 52);
+
+  text(
+    "TOUCH TO TOGGLE SOUND",
+    width / 2,
+    height - 27
+  );
+}
+
+// ============================================
+// KEYBOARD TEST CONTROLS
+// ============================================
+
+void keyPressed() {
+
+  // SPACE = simulate touch
+  if (key == ' ') {
+    toggleMusic();
+    touchPulse = 1.0;
+  }
+
+  // UP = increase temperature
+  if (keyCode == UP) {
+    temperature += 0.2;
+  }
+
+  // DOWN = decrease temperature
+  if (keyCode == DOWN) {
+    temperature -= 0.2;
+  }
+
+  // R = return to 23 C
+  if (key == 'r' || key == 'R') {
+    temperature = 23.0;
+  }
+}
+
