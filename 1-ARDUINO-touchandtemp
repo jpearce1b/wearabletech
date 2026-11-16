@@ -1,0 +1,55 @@
+
+#include <Wire.h>
+#include <SparkFun_TMP117.h>
+
+TMP117 sensor;
+
+// Capacitive touch
+const int touchPin = A0;
+const int touchThreshold = 45000;
+
+bool lastTouch = false;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1500);
+
+  Wire.begin();
+
+  Serial.println("NANO ESP32 - TEMPERATURE + TOUCH");
+
+  if (sensor.begin()) {
+    Serial.println("TMP117 detected!");
+  } else {
+    Serial.println("TMP117 not detected - check wiring");
+  }
+
+  Serial.println("Capacitive touch ready");
+}
+
+void loop() {
+
+  // Read temperature
+  float temperature = sensor.readTempC();
+
+  // Read capacitive touch
+  int touchValue = touchRead(touchPin);
+
+  bool touching = touchValue > touchThreshold;
+
+  // Send data to Serial Monitor
+  Serial.print("Temperature: ");
+  Serial.print(temperature, 2);
+  Serial.print(" C | Touch: ");
+  Serial.print(touchValue);
+
+  if (touching && !lastTouch) {
+    Serial.print("  *** TOUCH DETECTED ***");
+  }
+
+  Serial.println();
+
+  lastTouch = touching;
+
+  delay(100);
+}
