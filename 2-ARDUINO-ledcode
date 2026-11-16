@@ -1,0 +1,84 @@
+
+#include <Adafruit_NeoPixel.h>
+
+#define LED_PIN 6
+#define LED_COUNT 64
+#define WIDTH 8
+#define HEIGHT 8
+
+Adafruit_NeoPixel matrix(
+  LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800
+);
+
+// 64 pixels x 6 hex characters
+char incoming[385];
+int position = 0;
+
+int xy(int x, int y) {
+  // Serpentine row mapping
+  if (y % 2 == 0) return y * WIDTH + x;
+  return y * WIDTH + (WIDTH - 1 - x);
+}
+
+int hexValue(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return 0;
+}
+
+byte readHexByte(const char* p) {
+  return (hexValue(p[0]) << 4) | hexValue(p[1]);
+}
+
+void displayFrame() {
+  for (int i = 0; i < LED_COUNT; i++) {
+    int offset = i * 6;
+
+    byte r = readHexByte(incoming + offset);
+    byte g = readHexByte(incoming + offset + 2);
+    byte b = readHexByte(incoming + offset + 4);
+
+    int x = i % WIDTH;
+    int y = i / WIDTH;
+
+    matrix.setPixelColor(
+      xy(x, y),
+      matrix.Color(r, g, b)
+    );
+  }
+
+  matrix.show();
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  matrix.begin();
+  matrix.setBrightness(45);
+  matrix.clear();
+  matrix.show();
+}
+
+void loop() {
+  while (Serial.available()) {
+    char c = Serial.read();
+
+    if (c == '\n') {
+      if (position == 384) {
+        incoming[384] = '\0';
+        displayFrame();
+      }
+      position = 0;
+    }
+    else if (c != '\r') {
+      if (position < 384) {
+        incoming[position++] = c;
+      } else {
+        position = 385; // Discard oversized frame
+      }
+    }
+  }
+}
+
+
