@@ -1,0 +1,1088 @@
+
+import processing.serial.*;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.Collections;
+
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+
+// ===================================================
+// WIKIPEDIA / LIVE DATA MONITOR
+// Processing 4 — Workshop Edition
+//
+// Arduino Uno + 8x8 NeoPixel matrix
+// Data pin D6
+// Serial baud: 115200
+//
+// Wikipedia API with custom User-Agent
+// ===================================================
+
+
+// ===================================================
+// SERIAL SETTINGS
+// ===================================================
+
+// Run once to see numbered serial ports.
+// Change -1 to your Arduino's port number.
+int UNO_PORT = -1;
+
+boolean SHOW_MINI_MATRIX = true;
+
+Serial uno;
+
+String serialStatus = "NOT CONNECTED";
+
+
+// ===================================================
+// MATRIX SETTINGS
+// ===================================================
+
+final int GRID = 8;
+
+color[] ledColours = new color[64];
+
+ArrayList<Wave> waves =
+  new ArrayList<Wave>();
+
+
+// ===================================================
+// WIKIPEDIA SETTINGS
+// ===================================================
+
+String apiURL =
+  "https://en.wikipedia.org/w/api.php?" +
+  "action=query&list=recentchanges" +
+  "&rctype=edit%7Cnew" +
+  "&rcnamespace=0" +
+  "&rcprop=ids%7Ctitle%7Csizes" +
+  "&rclimit=100" +
+  "&format=json&formatversion=2";
+
+String apiStatus = "WAITING";
+
+ArrayList<EditEvent> recentEdits =
+  new ArrayList<EditEvent>();
+
+HashSet<Integer> seenIDs =
+  new HashSet<Integer>();
+
+int totalEdits = 0;
+int smallEdits = 0;
+int mediumEdits = 0;
+int largeEdits = 0;
+
+int[] history = new int[48];
+
+int lastPoll = -10000;
+int lastFrame = 0;
+
+final int POLL_INTERVAL = 10000;
+final int FRAME_INTERVAL = 67;
+
+boolean firstPoll = true;
+
+
+// ===================================================
+// WINDOW
+// ===================================================
+
+void settings() {
+  size(1160, 760);
+}
+
+
+// ===================================================
+// SETUP
+// ===================================================
+
+void setup() {
+
+  frameRate(30);
+
+  surface.setTitle(
+    "WIKIPEDIA / LIVE DATA MONITOR"
+  );
+
+  println();
+  println("==============================");
+  println("AVAILABLE SERIAL PORTS");
+  println("==============================");
+
+  String[] ports = Serial.list();
+
+  for (int i = 0; i < ports.length; i++) {
+    println("[" + i + "] " + ports[i]);
+  }
+
+  println("==============================");
+  println();
+
+  if (UNO_PORT >= 0 &&
+      UNO_PORT < ports.length) {
+
+    try {
+
+      uno = new Serial(
+        this,
+        ports[UNO_PORT],
+        115200
+      );
+
+      serialStatus = "CONNECTED";
+
+      println("Arduino connected:");
+      println(ports[UNO_PORT]);
+
+    } catch (Exception e) {
+
+      serialStatus = "CONNECTION FAILED";
+
+      println("Serial connection error:");
+      println(e);
+    }
+  }
+
+  for (int i = 0; i < 64; i++) {
+    ledColours[i] = color(0);
+  }
+
+  textFont(
+    createFont("Monospaced", 14)
+  );
+
+  println("Wikipedia monitor starting...");
+}
+
+
+// ===================================================
+// MAIN LOOP
+// ===================================================
+
+void draw() {
+
+  background(9, 14, 24);
+
+  // Poll Wikipedia every 10 seconds
+  if (millis() - lastPoll >= POLL_INTERVAL) {
+
+    lastPoll = millis();
+
+    pollWikipedia();
+  }
+
+  // Update matrix colours
+  updateLEDColours();
+
+  // Send RGB frames to Arduino
+  if (uno != null &&
+      millis() - lastFrame >= FRAME_INTERVAL) {
+
+    lastFrame = millis();
+
+    sendMatrixFrame();
+  }
+
+  drawDashboard();
+}
+
+
+// ===================================================
+// WIKIPEDIA HTTP REQUEST
+// FIX FOR PROCESSING LOADJSONOBJECT ERROR
+// ===================================================
+
+JSONObject loadWikipediaData(String urlString) {
+
+  HttpURLConnection connection = null;
+
+  try {
+
+    URL url = new URL(urlString);
+
+    connection =
+      (HttpURLConnection) url.openConnection();
+
+    connection.setRequestMethod("GET");
+
+    // Wikimedia requests a descriptive User-Agent.
+    connection.setRequestProperty(
+      "User-Agent",
+      "WikipediaLEDWorkshop/1.0 " +
+      "(https://github.com/jpearce1b)"
+    );
+
+    connection.setRequestProperty(
+      "Accept",
+      "application/json"
+    );
+
+    connection.setConnectTimeout(10000);
+    connection.setReadTimeout(10000);
+
+    int responseCode =
+      connection.getResponseCode();
+
+    println(
+      "Wikipedia HTTP: " + responseCode
+    );
+
+    if (responseCode != 200) {
+
+      println(
+        "Wikipedia API returned HTTP " +
+        responseCode
+      );
+
+      return null;
+    }
+
+    BufferedReader reader =
+      new BufferedReader(
+        new InputStreamReader(
+          connection.getInputStream(),
+          "UTF-8"
+        )
+      );
+
+    StringBuilder result =
+      new StringBuilder();
+
+    String line;
+
+    while (
+      (line = reader.readLine()) != null
+    ) {
+
+      result.append(line);
+    }
+
+    reader.close();
+
+    return parseJSONObject(
+      result.toString()
+    );
+
+  } catch (Exception e) {
+
+    println(
+      "Wikipedia connection error: " + e
+    );
+
+    return null;
+
+  } finally {
+
+    if (connection != null) {
+      connection.disconnect();
+    }
+  }
+}
+
+
+// ===================================================
+// POLL WIKIPEDIA
+// ===================================================
+
+void pollWikipedia() {
+
+  try {
+
+    JSONObject response =
+      loadWikipediaData(apiURL);
+
+    if (response == null) {
+
+      apiStatus = "CONNECTION ERROR";
+
+      return;
+    }
+
+    JSONObject query =
+      response.getJSONObject("query");
+
+    JSONArray edits =
+      query.getJSONArray("recentchanges");
+
+    int newCount = 0;
+
+    ArrayList<EditEvent> pending =
+      new ArrayList<EditEvent>();
+
+
+    for (int i = 0; i < edits.size(); i++) {
+
+      JSONObject e =
+        edits.getJSONObject(i);
+
+      int id =
+        e.getInt("rcid");
+
+      String title =
+        e.getString("title");
+
+      int oldSize =
+        e.getInt("oldlen", 0);
+
+      int newSize =
+        e.getInt("newlen", 0);
+
+      int change =
+        abs(newSize - oldSize);
+
+
+      if (!seenIDs.contains(id)) {
+
+        seenIDs.add(id);
+
+        if (!firstPoll) {
+
+          pending.add(
+            new EditEvent(
+              title,
+              change
+            )
+          );
+
+          newCount++;
+        }
+      }
+    }
+
+
+    // Keep memory usage bounded
+    if (seenIDs.size() > 5000) {
+
+      seenIDs.clear();
+      firstPoll = true;
+    }
+
+
+    // Oldest edits first
+    Collections.reverse(pending);
+
+    for (EditEvent event : pending) {
+
+      registerEdit(event);
+    }
+
+
+    // Update activity history
+    for (int i = 0;
+         i < history.length - 1;
+         i++) {
+
+      history[i] =
+        history[i + 1];
+    }
+
+    history[history.length - 1] =
+      newCount;
+
+
+    apiStatus = "CONNECTED";
+
+    firstPoll = false;
+
+
+    println(
+      "Wikipedia poll: " +
+      newCount +
+      " new edits"
+    );
+
+  } catch (Exception e) {
+
+    apiStatus = "API ERROR";
+
+    println(
+      "Wikipedia parsing error: " + e
+    );
+  }
+}
+
+
+// ===================================================
+// REGISTER WIKIPEDIA EDIT
+// ===================================================
+
+void registerEdit(EditEvent event) {
+
+  totalEdits++;
+
+  color waveColor;
+
+
+  // SMALL EDIT
+  if (event.bytes < 50) {
+
+    smallEdits++;
+
+    waveColor =
+      color(40, 210, 255);
+
+  }
+
+  // MEDIUM EDIT
+  else if (event.bytes < 500) {
+
+    mediumEdits++;
+
+    waveColor =
+      color(190, 75, 255);
+
+  }
+
+  // LARGE EDIT
+  else {
+
+    largeEdits++;
+
+    waveColor =
+      color(255, 150, 35);
+
+  }
+
+
+  waves.add(
+    new Wave(
+      random(0, 8),
+      random(0, 8),
+      waveColor
+    )
+  );
+
+
+  recentEdits.add(
+    0,
+    event
+  );
+
+
+  if (recentEdits.size() > 10) {
+
+    recentEdits.remove(
+      recentEdits.size() - 1
+    );
+  }
+
+
+  if (waves.size() > 120) {
+
+    waves.remove(0);
+  }
+}
+
+
+// ===================================================
+// UPDATE LED MATRIX COLOURS
+// ===================================================
+
+void updateLEDColours() {
+
+  // Dark background
+  for (int i = 0; i < 64; i++) {
+
+    ledColours[i] =
+      color(0, 2, 5);
+  }
+
+
+  for (int w = waves.size() - 1;
+       w >= 0;
+       w--) {
+
+    Wave wave =
+      waves.get(w);
+
+
+    float age =
+      (millis() - wave.startTime) /
+      3000.0;
+
+
+    if (age >= 1.0) {
+
+      waves.remove(w);
+
+      continue;
+    }
+
+
+    float radius =
+      age * 11.0;
+
+    float fade =
+      1.0 - age;
+
+
+    for (int y = 0; y < GRID; y++) {
+
+      for (int x = 0; x < GRID; x++) {
+
+        float distance =
+          dist(
+            x,
+            y,
+            wave.x,
+            wave.y
+          );
+
+
+        float ring =
+          abs(distance - radius);
+
+
+        // Soft expanding ring
+        float intensity =
+          exp(
+            -ring * ring * 1.5
+          ) * fade;
+
+
+        // Bright centre flash
+        intensity +=
+          exp(
+            -distance * distance * 1.3
+          ) *
+          pow(
+            1.0 - age,
+            7.0
+          ) *
+          0.65;
+
+
+        int index =
+          y * GRID + x;
+
+
+        color previous =
+          ledColours[index];
+
+
+        float redValue =
+          min(
+            255,
+            red(previous) +
+            red(wave.c) * intensity
+          );
+
+
+        float greenValue =
+          min(
+            255,
+            green(previous) +
+            green(wave.c) * intensity
+          );
+
+
+        float blueValue =
+          min(
+            255,
+            blue(previous) +
+            blue(wave.c) * intensity
+          );
+
+
+        ledColours[index] =
+          color(
+            redValue,
+            greenValue,
+            blueValue
+          );
+      }
+    }
+  }
+}
+
+
+// ===================================================
+// SEND RGB DATA TO ARDUINO
+// ===================================================
+
+void sendMatrixFrame() {
+
+  StringBuilder frame =
+    new StringBuilder(385);
+
+
+  for (int i = 0; i < 64; i++) {
+
+    color c =
+      ledColours[i];
+
+
+    frame.append(
+      hex(
+        int(red(c)),
+        2
+      )
+    );
+
+    frame.append(
+      hex(
+        int(green(c)),
+        2
+      )
+    );
+
+    frame.append(
+      hex(
+        int(blue(c)),
+        2
+      )
+    );
+  }
+
+
+  frame.append('\n');
+
+
+  try {
+
+    uno.write(
+      frame.toString()
+    );
+
+  } catch (Exception e) {
+
+    serialStatus =
+      "SEND FAILED";
+
+    println(
+      "Serial send error: " + e
+    );
+
+    uno = null;
+  }
+}
+
+
+// ===================================================
+// DASHBOARD
+// ===================================================
+
+void drawDashboard() {
+
+  noStroke();
+
+
+  fill(85, 231, 212);
+  textSize(13);
+
+  text(
+    "WIKIPEDIA / LIVE DATA MONITOR",
+    45,
+    48
+  );
+
+
+  fill(235, 242, 255);
+  textSize(31);
+
+  text(
+    "GLOBAL KNOWLEDGE / LIVE ACTIVITY",
+    45,
+    95
+  );
+
+
+  fill(134, 155, 181);
+  textSize(13);
+
+  text(
+    "English Wikipedia | Article edits and new pages",
+    45,
+    124
+  );
+
+
+  // CONNECTION STATUS
+  fill(23, 36, 54);
+  rect(
+    45,
+    155,
+    1070,
+    48,
+    9
+  );
+
+
+  fill(85, 231, 212);
+  textSize(13);
+
+  text(
+    "API: " + apiStatus,
+    65,
+    185
+  );
+
+
+  fill(180, 195, 215);
+
+  text(
+    "ARDUINO: " + serialStatus,
+    350,
+    185
+  );
+
+
+  text(
+    "POLL: 10 SEC",
+    760,
+    185
+  );
+
+
+  // STATISTICS
+  drawStat(
+    45,
+    225,
+    "TOTAL EDITS",
+    totalEdits,
+    color(85, 231, 212)
+  );
+
+  drawStat(
+    320,
+    225,
+    "SMALL",
+    smallEdits,
+    color(40, 210, 255)
+  );
+
+  drawStat(
+    595,
+    225,
+    "MEDIUM",
+    mediumEdits,
+    color(190, 75, 255)
+  );
+
+  drawStat(
+    870,
+    225,
+    "LARGE",
+    largeEdits,
+    color(255, 150, 35)
+  );
+
+
+  // ACTIVITY GRAPH PANEL
+  fill(19, 30, 46);
+
+  rect(
+    45,
+    365,
+    710,
+    245,
+    12
+  );
+
+
+  fill(220, 234, 252);
+  textSize(15);
+
+  text(
+    "EDIT ACTIVITY / 10 SECOND INTERVALS",
+    65,
+    397
+  );
+
+
+  drawHistoryGraph();
+
+
+  // RECENT EDITS PANEL
+  fill(19, 30, 46);
+
+  rect(
+    775,
+    365,
+    340,
+    245,
+    12
+  );
+
+
+  fill(220, 234, 252);
+  textSize(15);
+
+  text(
+    "INCOMING EDITS",
+    795,
+    397
+  );
+
+
+  textSize(11);
+
+
+  for (int i = 0;
+       i < min(7, recentEdits.size());
+       i++) {
+
+    EditEvent event =
+      recentEdits.get(i);
+
+
+    if (event.bytes < 50) {
+
+      fill(40, 210, 255);
+
+    } else if (event.bytes < 500) {
+
+      fill(190, 75, 255);
+
+    } else {
+
+      fill(255, 150, 35);
+    }
+
+
+    String name =
+      event.title;
+
+
+    if (name.length() > 28) {
+
+      name =
+        name.substring(0, 25) + "...";
+    }
+
+
+    text(
+      name,
+      795,
+      430 + i * 25
+    );
+
+
+    fill(145, 166, 190);
+
+    text(
+      event.bytes + " B",
+      1050,
+      430 + i * 25
+    );
+  }
+
+
+  // FOOTER
+  fill(110, 135, 160);
+  textSize(12);
+
+  text(
+    "SOURCE: WIKIPEDIA RECENT CHANGES API",
+    45,
+    670
+  );
+
+  text(
+    "RGB MATRIX 8 x 8 / 64 PIXELS",
+    45,
+    694
+  );
+
+
+  if (SHOW_MINI_MATRIX) {
+
+    drawMiniMatrix(
+      940,
+      635,
+      13
+    );
+  }
+}
+
+
+// ===================================================
+// STATISTIC CARD
+// ===================================================
+
+void drawStat(
+  int x,
+  int y,
+  String name,
+  int value,
+  color accent
+) {
+
+  fill(19, 30, 46);
+
+  rect(
+    x,
+    y,
+    245,
+    115,
+    12
+  );
+
+
+  fill(130, 151, 176);
+  textSize(13);
+
+  text(
+    name,
+    x + 20,
+    y + 28
+  );
+
+
+  fill(accent);
+  textSize(35);
+
+  text(
+    value,
+    x + 20,
+    y + 80
+  );
+}
+
+
+// ===================================================
+// ACTIVITY GRAPH
+// ===================================================
+
+void drawHistoryGraph() {
+
+  int maximum = 1;
+
+
+  for (int n : history) {
+
+    maximum =
+      max(maximum, n);
+  }
+
+
+  float graphX = 65;
+  float graphY = 425;
+  float graphW = 670;
+  float graphH = 155;
+
+  float barWidth =
+    graphW / history.length;
+
+
+  noStroke();
+
+
+  for (int i = 0;
+       i < history.length;
+       i++) {
+
+    float h =
+      map(
+        history[i],
+        0,
+        maximum,
+        0,
+        graphH
+      );
+
+
+    fill(50, 190, 210);
+
+
+    rect(
+      graphX + i * barWidth,
+      graphY + graphH - h,
+      max(2, barWidth - 3),
+      h
+    );
+  }
+}
+
+
+// ===================================================
+// MINI 8x8 MATRIX PREVIEW
+// ===================================================
+
+void drawMiniMatrix(
+  int x,
+  int y,
+  int cell
+) {
+
+  noStroke();
+
+
+  for (int row = 0;
+       row < 8;
+       row++) {
+
+    for (int col = 0;
+         col < 8;
+         col++) {
+
+      fill(
+        ledColours[row * 8 + col]
+      );
+
+
+      rect(
+        x + col * cell,
+        y + row * cell,
+        cell - 2,
+        cell - 2,
+        2
+      );
+    }
+  }
+}
+
+
+// ===================================================
+// WAVE CLASS
+// ===================================================
+
+class Wave {
+
+  float x;
+  float y;
+
+  color c;
+
+  int startTime;
+
+
+  Wave(
+    float px,
+    float py,
+    color pc
+  ) {
+
+    x = px;
+    y = py;
+
+    c = pc;
+
+    startTime = millis();
+  }
+}
+
+
+// ===================================================
+// EDIT EVENT CLASS
+// ===================================================
+
+class EditEvent {
+
+  String title;
+
+  int bytes;
+
+
+  EditEvent(
+    String t,
+    int b
+  ) {
+
+    title = t;
+    bytes = b;
+  }
+}
