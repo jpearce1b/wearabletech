@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#080e1c" />
+<title>Live Temperature | Wearable Tech</title>
+<style>
+:root{color-scheme:dark;--bg:#080e1c;--card:#111b30;--muted:#a6b6cf;--edge:#25354f;--blue:#66c9ff;--cyan:#b1f4ff}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(ellipse at 50% -25%,#1d4162 0%,#101c32 42%,#080e1c 80%);color:#eff7ff}main{max-width:850px;margin:0 auto;padding:68px 24px 48px}.eyebrow{color:#81c4e4;letter-spacing:.19em;text-transform:uppercase;font-size:12px;font-weight:700}h1{font-size:clamp(2rem,6vw,3.3rem);letter-spacing:-.045em;margin:12px 0}.subtitle{color:var(--muted);font-size:1rem;line-height:1.55;max-width:630px}.panel{margin-top:35px;padding:clamp(24px,5vw,46px);border-radius:24px;background:linear-gradient(150deg,#172b47bb,#0c1526dd);border:1px solid #35506c;box-shadow:0 25px 75px #0005;text-align:center}.status{display:inline-flex;align-items:center;gap:9px;font-size:13px;color:#b7c8df}.dot{display:inline-block;height:9px;width:9px;background:#ffa948;border-radius:50%;box-shadow:0 0 13px #ffa94877}.dot.online{background:#56dfb9;box-shadow:0 0 15px #56dfb977}.dot.stale{background:#ffb454}.dot.error{background:#ff748d}.reading{font-size:clamp(5.5rem,17vw,9.5rem);font-weight:300;letter-spacing:-.085em;line-height:1.1;margin:18px 0 5px;font-variant-numeric:tabular-nums;color:#d9f6ff;text-shadow:0 0 65px #3db0ff33}.degree{font-size:.35em;letter-spacing:-.02em;vertical-align:top;display:inline-block;margin-top:.25em}.label{color:#aabbd5;text-transform:uppercase;letter-spacing:.15em;font-size:11px;font-weight:700}.updated{color:#a0b4d0;font-size:13px;margin-top:19px;min-height:20px}.spark-wrap{margin-top:30px;text-align:left}.spark-wrap .label{margin-bottom:12px}svg{display:block;width:100%;height:110px;overflow:visible}.baseline{stroke:#35506c;stroke-width:1;stroke-dasharray:3 7}.line{stroke:#64caff;stroke-width:3;fill:none;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 5px #3ebdff77)}.foot{padding-top:25px;text-align:center;font-size:12px;color:#8ca0bd;line-height:1.7}.foot a{color:#91d9fc;text-decoration:none}.foot a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<main>
+<div class="eyebrow">Wearable Technology / Live Sensor</div>
+<h1>Temperature, in real time.</h1>
+<p class="subtitle">Live readings from a TMP117 sensor connected to an Arduino Nano ESP32, transmitted over Wi-Fi to Adafruit IO.</p>
+<section class="panel" aria-label="Current sensor temperature">
+ <div class="status"><span id="dot" class="dot"></span><span id="status">Connecting to sensor data…</span></div>
+ <div class="reading" aria-live="polite"><span id="value">--.--</span><span class="degree">°C</span></div>
+ <div class="label">TMP117 sensor temperature</div>
+ <div class="updated" id="updated">Awaiting first reading</div>
+ <div class="spark-wrap"><div class="label">Readings while this page is open</div><svg id="graph" viewBox="0 0 700 110" preserveAspectRatio="none" role="img" aria-label="Recent temperature readings"><line class="baseline" x1="0" y1="55" x2="700" y2="55"/><polyline id="series" class="line" points=""/></svg></div>
+</section>
+<p class="foot">Updates approximately every 10 seconds while the Arduino is online.<br>Source: <a href="https://io.adafruit.com/jpearce1b/feeds/temperature" target="_blank" rel="noopener noreferrer">Adafruit IO public temperature feed</a> · No account required to view this page.</p>
+</main>
+<script>
+(() => {
+  // Public read-only feed endpoint. NEVER put an Adafruit IO key in this file.
+  const feedURL = 'https://io.adafruit.com/api/v2/jpearce1b/feeds/temperature/data/last';
+  const pollMs = 10000;
+  const staleAfterMs = 60000;
+  const valueEl = document.getElementById('value');
+  const statusEl = document.getElementById('status');
+  const updatedEl = document.getElementById('updated');
+  const dotEl = document.getElementById('dot');
+  const seriesEl = document.getElementById('series');
+  const readings = [];
+  let latestId = null;
+  function showStatus(message, state) { statusEl.textContent = message; dotEl.className = 'dot ' + state; }
+  function draw() {
+    if (!readings.length) return;
+    const values = readings.map(x => x.value);
+    const min = Math.min(...values) - .3;
+    const max = Math.max(...values) + .3;
+    const span = Math.max(max-min,.5);
+    seriesEl.setAttribute('points', readings.map((r,i) => {
+      const x = readings.length === 1 ? 350 : (i / (readings.length-1))*700;
+      const y = 103 - ((r.value-min)/span)*96;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' '));
+  }
+  async function update() {
+    try {
+      const res = await fetch(feedURL + '?_=' + Date.now(), {cache:'no-store'});
+      if (!res.ok) throw new Error('HTTP ' + res.status + (res.status === 401 || res.status === 403 ? ' — make the temperature feed public' : ''));
+      const data = await res.json();
+      const temp = Number(data.value);
+      if (!Number.isFinite(temp)) throw new Error('No valid temperature found');
+      valueEl.textContent = temp.toFixed(2);
+      if (data.id !== latestId) {
+        latestId = data.id;
+        readings.push({ value:temp });
+        if (readings.length > 60) readings.shift();
+        draw();
+      }
+      const sampleTime = Date.parse(data.created_at || data.received_at || '');
+      if (Number.isFinite(sampleTime)) {
+        const age = Math.max(0, Date.now()-sampleTime);
+        updatedEl.textContent = 'Last sensor reading: ' + new Date(sampleTime).toLocaleString();
+        if (age > staleAfterMs) showStatus('Sensor not updating — showing last reading', 'stale');
+        else showStatus('Live sensor connected', 'online');
+      } else {
+        updatedEl.textContent = 'Most recent feed value';
+        showStatus('Reading received', 'online');
+      }
+    } catch(err) {
+      showStatus('Unable to load public feed', 'error');
+      updatedEl.textContent = err.message + ' — check feed privacy and username';
+    }
+  }
+  update();
+  setInterval(update, pollMs);
+})();
+</script>
+</body>
+</html>
