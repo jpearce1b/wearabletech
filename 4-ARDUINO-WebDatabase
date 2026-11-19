@@ -1,0 +1,244 @@
+
+#include <Wire.h>
+#include <SparkFun_TMP117.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <math.h>
+
+// ==========================================
+// NANO ESP32 - TEMP + TOUCH + WIFI
+// Processing via UDP
+// Temperature to Adafruit IO
+// ==========================================
+
+TMP117 sensor;
+
+// CAPACITIVE TOUCH
+const int touchPin = A0;
+const int touchThreshold = 45000;
+bool lastTouch = false;
+
+// WIFI
+const char* ssid = "blahblahdeck";
+const char* password = "electr0nic";
+
+// PROCESSING ON MAC
+const char* macIP = "192.168.0.197";
+const int udpPort = 5005;
+WiFiUDP udp;
+
+// ADAFRUIT IO
+const char* aioUsername = "jpearce1b";
+const char* aioKey = "34e22cb561524037956a4a86bfceb20a";
+const char* aioFeed = "temperature";
+
+// TIMING
+unsigned long lastSend = 0;
+unsigned long lastAIO = 0;
+unsigned long lastReconnect = 0;
+
+const unsigned long sendInterval = 100;
+const unsigned long aioInterval = 10000;
+
+// TEMPERATURE
+float temperature = 24.0;
+
+// ==========================================
+// SEND TEMPERATURE TO ADAFRUIT IO
+// ==========================================
+
+void sendToAdafruit(float temp) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("AIO: WiFi not connected");
+    return;
+  }
+
+  if (isnan(temp)) {
+    Serial.println("AIO: Invalid temperature");
+    return;
+  }
+
+  WiFiClientSecure client;
+
+  // Demo-only HTTPS setting.
+  // For production, configure CA verification.
+  client.setInsecure();
+
+  HTTPClient http;
+
+  String url = "https://io.adafruit.com/api/v2/";
+  url += aioUsername;
+  url += "/feeds/";
+  url += aioFeed;
+  url += "/data";
+
+  http.setTimeout(2500);
+
+  if (!http.begin(client, url)) {
+    Serial.println("AIO: Connection failed");
+    return;
+  }
+
+  http.addHeader("X-AIO-Key", aioKey);
+  http.addHeader("Content-Type",
+                 "application/json");
+
+  String payload = "{\"value\":";
+  payload += String(temp, 2);
+  payload += "}";
+
+  int responseCode = http.POST(payload);
+
+  Serial.println();
+  Serial.println("------------------------------");
+
+  if (responseCode >= 200 &&
+      responseCode < 300) {
+
+    Serial.print("ADAfruit IO SUCCESS: ");
+    Serial.print(temp, 2);
+    Serial.println(" C");
+
+  } else {
+
+    Serial.print("Adafruit IO error: ");
+    Serial.println(responseCode);
+
+    if (responseCode > 0) {
+      Serial.println(http.getString());
+    }
+  }
+
+  Serial.println("------------------------------");
+  Serial.println();
+
+  http.end();
+}
+
+// ==========================================
+// SETUP
+// ==========================================
+
+void setup() {
+
+  Serial.begin(115200);
+  delay(1500);
+
+  Wire.begin();
+
+  Serial.println();
+  Serial.println("NANO ESP32 - TEMP + TOUCH + AIO");
+
+  if (sensor.begin()) {
+    Serial.println("TMP117 detected!");
+  } else {
+    Serial.println("TMP117 not detected!");
+  }
+
+  Serial.println("Capacitive touch ready");
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+
+  unsigned long startAttempt = millis();
+
+  while (WiFi.status() != WL_CONNECTED &&
+         millis() - startAttempt < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WIFI CONNECTED!");
+    Serial.print("Nano IP: ");
+    Serial.println(WiFi.localIP());
+
+    Serial.print("Processing destination: ");
+    Serial.print(macIP);
+    Serial.print(":");
+    Serial.println(udpPort);
+  } else {
+    Serial.println("WiFi connection failed");
+  }
+
+  udp.begin(udpPort);
+
+  // First AIO upload after 10 seconds
+  lastAIO = millis();
+
+  Serial.println("System ready!");
+}
+
+// ==========================================
+// LOOP
+// ==========================================
+
+void loop() {
+
+  // WIFI RECONNECT
+  if (WiFi.status() != WL_CONNECTED &&
+      millis() - lastReconnect >= 5000) {
+
+    lastReconnect = millis();
+
+    Serial.println("Reconnecting WiFi...");
+    WiFi.reconnect();
+  }
+
+  // READ TEMPERATURE
+  temperature = sensor.readTempC();
+
+  // READ TOUCH
+  int touchValue = touchRead(touchPin);
+  bool touching = touchValue > touchThreshold;
+
+  Serial.print("Temperature: ");
+  Serial.print(temperature, 2);
+  Serial.print(" C | Touch: ");
+  Serial.print(touchValue);
+
+  if (touching && !lastTouch) {
+    Serial.print(" *** TOUCH DETECTED ***");
+  }
+
+  Serial.println();
+
+  lastTouch = touching;
+
+  // SEND DATA TO PROCESSING
+  if (millis() - lastSend >= sendInterval) {
+
+    lastSend = millis();
+
+    if (WiFi.status() == WL_CONNECTED) {
+
+      String data = String(temperature, 2);
+      data += ",";
+      data += String(touchValue);
+      data += ",";
+      data += String(touching ? 1 : 0);
+
+      udp.beginPacket(macIP, udpPort);
+      udp.print(data);
+      udp.endPacket();
+    }
+  }
+
+  // SEND TEMPERATURE TO ADAFRUIT IO
+  if (millis() - lastAIO >= aioInterval) {
+
+    lastAIO = millis();
+
+    sendToAdafruit(temperature);
+  }
+
+  delay(100);
+}
+
